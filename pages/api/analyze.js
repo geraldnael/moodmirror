@@ -12,27 +12,29 @@ export default async function handler(req, res) {
 
   const systemPrompt = `You are MoodMirror — an emotionally intelligent AI that reads journal entries and reflects the writer's inner emotional landscape back to them.
 
-Analyze the entry and respond ONLY with a valid JSON object. No markdown, no preamble, no explanation. Just raw JSON.
+Analyze the journal entry and respond ONLY with a valid JSON object. No markdown, no explanation, no extra text. Start with { and end with }.
 
-Respond with exactly this structure:
+Use EXACTLY this format:
 {
-  "emotions": [{ "name": "exhaustion", "intensity": 0.8 }, { "name": "gratitude", "intensity": 0.5 }],
+  "emotions": [{"name": "exhaustion", "intensity": 0.8}, {"name": "gratitude", "intensity": 0.5}],
   "mood_score": 0.2,
   "energy": 0.3,
   "themes": ["connection", "resilience"],
   "color_palette": ["#a78bfa", "#5eead4", "#f9a8d4"],
-  "reflection": "There is a quiet heaviness in your words today, yet something small kept you tethered. The stranger's smile arrived exactly when it needed to.",
+  "reflection": "Two or three warm sentences mirroring their experience back to them, specific to their words.",
   "word": "threshold"
 }
 
-Rules:
-- emotions: 2-5 items, intensity is a float between 0 and 1
-- mood_score: float from -1 to 1
-- energy: float from 0 to 1  
-- themes: 2-4 short string labels
-- color_palette: exactly 3 valid hex color strings
-- reflection: 2-3 warm sentences mirroring their experience, specific to their words, no generic advice
-- word: one poetic word (avoid "sad", "happy", "tired" — use "adrift", "kindling", "unraveling", "threshold", etc)`
+STRICT RULES:
+- emotions: array of 2 to 4 objects only, each with "name" (string) and "intensity" (number 0-1)
+- mood_score: single number from -1 to 1
+- energy: single number from 0 to 1
+- themes: array of 2 to 3 short strings
+- color_palette: array of exactly 3 hex color strings like "#a78bfa"
+- reflection: single string, 2-3 sentences, warm and specific to the entry
+- word: single evocative word, not "sad" or "happy", use words like "adrift", "kindling", "unraveling"
+- Do NOT add any text before or after the JSON
+- Do NOT use trailing commas`
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -45,7 +47,8 @@ Rules:
       },
       body: JSON.stringify({
         model: 'openrouter/free',
-        max_tokens: 1000,
+        max_tokens: 800,
+        temperature: 0.7,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: entry },
@@ -56,28 +59,52 @@ Rules:
     const data = await response.json()
 
     if (data.error) {
-      console.error('OpenRouter error:', JSON.stringify(data.error))
       return res.status(500).json({ error: `AI error: ${data.error.message}` })
     }
 
     const text = data.choices?.[0]?.message?.content || ''
     if (!text) {
-      console.error('Empty response:', JSON.stringify(data))
       return res.status(500).json({ error: 'Empty response from AI' })
     }
 
-    // Extract JSON even if there's extra text around it
+    // Try multiple JSON extraction strategies
+    let parsed = null
+
+    // Strategy 1: find the outermost { }
     const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) {
-      console.error('No JSON found in response:', text)
-      return res.status(500).json({ error: 'Could not parse AI response' })
+    if (jsonMatch) {
+      try {
+        parsed = JSON.parse(jsonMatch[0])
+      } catch (e1) {
+        // Strategy 2: fix common issues — trailing commas, unescaped chars
+        try {
+          const fixed = jsonMatch[0]
+            .replace(/,\s*([}\]])/g, '$1')   // remove trailing commas
+            .replace(/[\u0000-\u001F\u007F]/g, ' ') // remove control chars
+          parsed = JSON.parse(fixed)
+        } catch (e2) {
+          return res.status(500).json({ error: 'Could not parse AI response. Please try again.' })
+        }
+      }
+    } else {
+      return res.status(500).json({ error: 'No valid response from AI. Please try again.' })
     }
 
-    const parsed = JSON.parse(jsonMatch[0])
-    return res.status(200).json(parsed)
+    // Ensure required fields exist with fallbacks
+    const safe = {
+      emotions: parsed.emotions?.slice(0, 4) || [{ name: 'reflective', intensity: 0.6 }],
+      mood_score: typeof parsed.mood_score === 'number' ? parsed.mood_score : 0,
+      energy: typeof parsed.energy === 'number' ? parsed.energy : 0.5,
+      themes: parsed.themes?.slice(0, 3) || ['reflection'],
+      color_palette: parsed.color_palette?.slice(0, 3) || ['#a78bfa', '#5eead4', '#f9a8d4'],
+      reflection: parsed.reflection || 'Your words carry a quiet depth worth sitting with.',
+      word: parsed.word || 'present',
+    }
+
+    return res.status(200).json(safe)
 
   } catch (err) {
     console.error('API error:', err.message)
-    return res.status(500).json({ error: err.message || 'Analysis failed. Please try again.' })
+    return res.status(500).json({ error: 'Analysis failed. Please try again.' })
   }
 }
